@@ -1,0 +1,127 @@
+# Note: This has been replaced with /final/docker-compose.yml
+# # Peter Wells, 11/13/2023, CS-510 System Administration and DevOps
+
+# # This docker compose file will set up both a samba server to /mnt/samba_share and a pi-hole dns server
+# # For pihole, be sure change the environment variables to ones that match your set up better and
+# # change your dns server to 127.1.2.3 (or whatever you set FTLCONF_LOCAL_IPV4 to)
+
+# # For samba, create the directory /mnt/samba_share and chmod -R 777 /mnt before running.
+# # I suggest changing the username from admin and password 12345 (in the command section)
+
+# # They are based on these examples:
+# # Samba: https://github.com/dperson/samba/blob/master/docker-compose.yml
+# # PiHole: https://github.com/pi-hole/docker-pi-hole
+# # Wireguard: https://github.com/linuxserver/docker-wireguard
+# # Wireguard UI: https://github.com/ngoduykhanh/wireguard-ui/tree/master
+
+version: '3.4'
+
+services:
+  samba:
+    container_name: samba
+    image: dperson/samba
+    environment:
+      TZ: 'PST8PDT'
+    networks:
+      - default
+    ports:
+      - "137:137/udp"
+      - "138:138/udp"
+      - "139:139/tcp"
+      - "445:445/tcp"
+    read_only: false
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    volumes:
+      - /mnt/samba_share:/mnt/samba_share
+    command: '-s "samba_share;/mnt/samba_share;yes;no;no;admin" -u "admin;12345" -p'    # ⚠️ Change the username and password from admin;12345 to something better
+
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:latest
+    # image: pihole/pihole:master-armhf
+    # For DHCP it is recommended to remove these ports and instead add: network_mode: "host"
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "67:67/udp" # Only required if you are using Pi-hole as your DHCP server
+      - "80:80/tcp"
+    environment:
+      TZ: 'America/Los_Angeles'
+      WEBPASSWORD: 'password'
+      FTLCONF_LOCAL_IPV4: '127.1.2.3'
+      WEBTHEME: "lcars"
+      # PIHOLE_DNS_: 8.8.8.8;8.8.4.4    # You might consider adding this if there are issues with updating adlists
+    # Volumes store your data between container upgrades
+    volumes:
+      - './etc-pihole:/etc/pihole'
+      - './etc-dnsmasq.d:/etc/dnsmasq.d'
+    #   https://github.com/pi-hole/docker-pi-hole#note-on-capabilities
+    cap_add:
+      - NET_ADMIN # Required if you are using Pi-hole as your DHCP server, else not needed
+    restart: unless-stopped
+
+  wireguard:
+    container_name: wireguard
+    image: linuxserver/wireguard:latest
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - ./config:/config
+      - /lib/modules:/lib/modules
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+      - SERVERURL=172.24.84.47          # ⚠️ set to freebsd ip address
+      - SERVERPORT=51820
+      - PEERDNS=127.1.2.3               # ⚠️ set to pihole ip to use that as the dns
+      - ALLOWEDIPS=0.0.0.0/0
+      - LOG_CONFS=true
+    ports:
+      # port for wireguard-ui. this must be set here as the `wireguard-ui` container joins the network of this container and hasn't its own network over which it could publish the ports
+      - "5000:5000"
+      # port of the wireguard server
+      - "51820:51820/udp"
+
+  wireguard-ui:
+    container_name: wireguard-ui
+    image: ngoduykhanh/wireguard-ui:latest
+    depends_on:
+      - wireguard
+    cap_add:
+      - NET_ADMIN
+    # use the network of the 'wireguard' service. this enables to show active clients in the status page
+    network_mode: service:wireguard
+    environment:
+      - SENDGRID_API_KEY
+      - EMAIL_FROM_ADDRESS
+      - EMAIL_FROM_NAME
+      - SESSION_SECRET
+      - WGUI_USERNAME=admin                         # ⚠️ Change the Web UI Username
+      - WGUI_PASSWORD=admin                         # ⚠️ Change the Web UI Password
+      - WG_CONF_TEMPLATE
+      - WGUI_MANAGE_START=true
+      - WGUI_MANAGE_RESTART=true
+      - WGUI_DNS=127.1.2.3                          # ⚠️ set to pihole ip to use that as the dns
+      - WGUI_ENDPOINT_ADDRESS=172.24.84.47          # ⚠️ set to freebsd ip address
+      - WGUI_SERVER_POST_UP_SCRIPT=iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+      - WGUI_SERVER_POST_DOWN_SCRIPT=iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+    volumes:
+      - ./db:/app/db
+      - ./config:/etc/wireguard
+    restart: unless-stopped
+
+networks:
+  default:

@@ -1,0 +1,65 @@
+# NOTE THIS HAS BEEN REPLACED WITH ../hw4/docker-compose.yml
+
+# Peter Wells, 11/13/2023, CS-510 System Administration and DevOps
+
+# This docker compose file will set up both a samba server to /mnt/samba_share and a pi-hole dns server
+# For pihole, be sure change the environment variables to ones that match your set up better and
+# change your dns server to 127.1.2.3 (or whatever you set FTLCONF_LOCAL_IPV4 to)
+
+# For samba, create the directory /mnt/samba_share and chmod -R 777 /mnt before running.
+# I suggest changing the username from admin and password 12345 (in the command section)
+
+# They are based on these examples:
+# Samba: https://github.com/dperson/samba/blob/master/docker-compose.yml
+# PiHole: https://github.com/pi-hole/docker-pi-hole
+
+version: '3.4'
+
+services:
+  samba:
+    image: dperson/samba
+    environment:
+      TZ: 'PST8PDT'
+    networks:
+      - default
+    ports:
+      - "137:137/udp"
+      - "138:138/udp"
+      - "139:139/tcp"
+      - "445:445/tcp"
+    read_only: false
+    tmpfs:
+      - /tmp
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    volumes:
+      - /mnt/samba_share:/mnt/samba_share
+    command: '-s "samba_share;/mnt/samba_share;yes;no;no;admin" -u "admin;12345" -p'
+
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:latest
+    # For DHCP it is recommended to remove these ports and instead add: network_mode: "host"
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "67:67/udp" # Only required if you are using Pi-hole as your DHCP server
+      - "80:80/tcp"
+    environment:
+      TZ: 'America/Los_Angeles'
+      WEBPASSWORD: 'password'
+      FTLCONF_LOCAL_IPV4: '127.1.2.3'
+      WEBTHEME: "lcars"
+    # Volumes store your data between container upgrades
+    volumes:
+      - './etc-pihole:/etc/pihole'
+      - './etc-dnsmasq.d:/etc/dnsmasq.d'
+    #   https://github.com/pi-hole/docker-pi-hole#note-on-capabilities
+    cap_add:
+      - NET_ADMIN # Required if you are using Pi-hole as your DHCP server, else not needed
+    restart: unless-stopped
+
+networks:
+  default:
+

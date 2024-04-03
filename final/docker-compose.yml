@@ -1,0 +1,268 @@
+# # Peter Wells, 12/07/2023, CS-510 System Administration and DevOps
+# This is the final version of the docker-compose file for CS-510: Systems Administration and DevOps
+# It does NOT contain setup for Wazuh, that was done locally: see /hw4/hw4.md
+
+version: '3.6'
+services:
+  samba:
+      container_name: samba
+      image: dperson/samba
+      environment:
+        TZ: 'PST8PDT'
+      networks:
+        - default
+      ports:
+        - "137:137/udp"
+        - "138:138/udp"
+        - "139:139/tcp"
+        - "445:445/tcp"
+      read_only: false
+      tmpfs:
+        - /tmp
+      restart: unless-stopped
+      stdin_open: true
+      tty: true
+      volumes:
+        - /mnt/samba_share:/mnt/samba_share
+      command: '-s "samba_share;/mnt/samba_share;yes;no;no;admin" -u "admin;12345" -p'    # ⚠️ Change the username and password from admin;12345 to something better
+
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:latest
+    # image: pihole/pihole:master-armhf
+    # For DHCP it is recommended to remove these ports and instead add: network_mode: "host"
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "67:67/udp"   # Only required if you are using Pi-hole as your DHCP server
+      - "7878:80/tcp"
+    environment:
+      TZ: 'America/Los_Angeles'
+      WEBPASSWORD: 'password'
+      FTLCONF_LOCAL_IPV4: '127.1.2.3'
+      WEBTHEME: "lcars"
+      PIHOLE_DNS_: 8.8.8.8;8.8.4.4    # You might consider adding this if there are issues with updating adlists
+    # Volumes store your data between container upgrades
+    volumes:
+      - './etc-pihole:/etc/pihole'
+      - './etc-dnsmasq.d:/etc/dnsmasq.d'
+    #   https://github.com/pi-hole/docker-pi-hole#note-on-capabilities
+    dns:
+      - 127.0.0.1
+    cap_add:
+      - NET_ADMIN # Required if you are using Pi-hole as your DHCP server, else not needed
+    restart: unless-stopped
+
+  wireguard:
+    container_name: wireguard
+    image: linuxserver/wireguard:latest
+    restart: always
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    volumes:
+      - ./config:/config
+      - /lib/modules:/lib/modules
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Los_Angeles
+      - SERVERURL=172.24.84.47          # ⚠️ set to freebsd ip address
+      - SERVERPORT=51820
+      - PEERDNS=127.1.2.3               # ⚠️ set to pihole ip to use that as the dns
+      - ALLOWEDIPS=0.0.0.0/0
+      - LOG_CONFS=true
+    ports:
+      # port for wireguard-ui. this must be set here as the `wireguard-ui` container joins the network of this container and hasn't its own network over which it could publish the ports
+      - "5000:5000"
+      # port of the wireguard server
+      - "51820:51820/udp"
+
+  wireguard-ui:
+    container_name: wireguard-ui
+    image: ngoduykhanh/wireguard-ui:latest
+    restart: unless-stopped
+    depends_on:
+      - wireguard
+    cap_add:
+      - NET_ADMIN
+    # use the network of the 'wireguard' service. this enables to show active clients in the status page
+    network_mode: service:wireguard
+    environment:
+      - SENDGRID_API_KEY
+      - EMAIL_FROM_ADDRESS
+      - EMAIL_FROM_NAME
+      - SESSION_SECRET
+      - WGUI_USERNAME=admin                         # ⚠️ Change the Web UI Username
+      - WGUI_PASSWORD=admin                         # ⚠️ Change the Web UI Password
+      - WG_CONF_TEMPLATE
+      - WGUI_MANAGE_START=true
+      - WGUI_MANAGE_RESTART=true
+      - WGUI_DNS=127.1.2.3                          # ⚠️ set to pihole ip to use that as the dns
+      - WGUI_ENDPOINT_ADDRESS=172.24.84.47          # ⚠️ set to freebsd ip address
+      - WGUI_SERVER_POST_UP_SCRIPT=iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+      - WGUI_SERVER_POST_DOWN_SCRIPT=iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+    volumes:
+      - ./db:/app/db
+      - ./config:/etc/wireguard
+
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: always
+    networks:
+      - default
+    ports:
+      - 8888:80
+    environment:
+      DOMAIN: "https://vaultwarden.example.com"  # Your domain; vaultwarden needs to know it's https to work properly with attachments
+    volumes:
+      - ./vw-data:/data
+
+  db:
+    container_name: zonedb
+    image: mariadb
+    restart: always
+    networks:
+      - zoneminder
+    volumes:
+      - ./zm/db:/var/lib/mysql
+    environment:
+      - MYSQL_DATABASE=zm
+    env_file:
+      - ./.env
+
+  zoneminder:
+    container_name: zoneminder
+    image: ghcr.io/zoneminder-containers/zoneminder-base:latest
+    restart: always
+    stop_grace_period: 45s
+    depends_on:
+      - db
+    ports:
+      - 7979:80
+    networks:
+      - zoneminder
+    volumes:
+      - ./zm/data:/data
+      - ./zm/config:/config
+      - ./zm/log:/log
+      - type: tmpfs
+        target: /dev/shm
+        tmpfs:
+          size: 1000000000
+    env_file:
+      - ./.env
+#    environment:
+#      - ZM_SERVER_HOST=zoneminder1
+
+  jenkins:
+    container_name: jenkins
+    image: jenkins/jenkins:lts
+    privileged: true
+    user: root
+    restart: always
+    ports:
+      - 8080:8080
+      - 50000:50000
+    volumes:
+      - ./jenkins_configuration:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      jenkinslab:
+        ipv4_address: 10.9.0.5
+  
+  gitlab:
+    container_name: gitlab
+    image: 'gitlab/gitlab-ee:latest'
+    restart: always
+    hostname: 'gitlab.example.com'
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab.example.com:8929'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2224
+    ports:
+      - '8929:8929'
+      - '2224:22'
+    volumes:
+      - '$GITLAB_HOME/config:/etc/gitlab'
+      - '$GITLAB_HOME/logs:/var/log/gitlab'
+      - '$GITLAB_HOME/data:/var/opt/gitlab'
+    shm_size: '256m'
+    networks:
+      jenkinslab:
+        ipv4_address: 10.9.0.6
+
+
+networks:
+  zoneminder:
+  default:
+  jenkinslab:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.9.0.0/16
+          gateway: 10.9.0.1
+
+
+# VaultWarden - setting up HTTPS reference
+# If you wanted HTTPS for vaultwarden (which is required for lots of browsers) you would need to set up a reverse proxy: https://github.com/dani-garcia/vaultwarden/wiki/Using-Docker-Compose
+# See the related Caddyfile too
+
+# vaultwarden:
+#   image: vaultwarden/server:latest
+#   container_name: vaultwarden
+#   restart: always
+#   environment:
+#     DOMAIN: "https://vaultwarden.example.com"  # Your domain; vaultwarden needs to know it's https to work properly with attachments
+#   volumes:
+#     - ./vw-data:/data
+
+# caddy:
+#   image: caddy:2
+#   container_name: caddy
+#   restart: always
+#   ports:
+#     - 80:80  # Needed for the ACME HTTP-01 challenge.
+#     - 443:443
+#   volumes:
+#     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+#     - ./caddy-config:/config
+#     - ./caddy-data:/data
+#   environment:
+#     DOMAIN: "https://vaultwarden.example.com"  # Your domain.
+#     EMAIL: "admin@example.com"                 # The email address to use for ACME registration.
+#     LOG_FILE: "/data/access.log"
+
+
+# ./Caddyfile (needs to be located next to docker-compose.yml)
+# {$DOMAIN}:443 {
+#   log {
+#     level INFO
+#     output file {$LOG_FILE} {
+#       roll_size 10MB
+#       roll_keep 10
+#     }
+#   }
+
+#   # Use the ACME DNS-01 challenge to get a cert for the configured domain.
+#   tls {
+#     dns duckdns {$DUCKDNS_TOKEN}
+#   }
+
+#   # This setting may have compatibility issues with some browsers
+#   # (e.g., attachment downloading on Firefox). Try disabling this
+#   # if you encounter issues.
+#   encode gzip
+
+#   # Proxy everything to Rocket
+#   reverse_proxy vaultwarden:80
+# }
